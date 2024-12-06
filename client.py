@@ -1,182 +1,191 @@
 import socket
 import threading
-import sys
-import signal
-import time
+import os
 import json
+import base64
 import hashlib
 import secrets
+from tkinter import *
+from tkinter import messagebox
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.backends import default_backend
-import base64
-import os
 
 MAX_LEN = 200
-exit_flag = False
+DH_P = 23  # Diffie-Hellman parameter (use a real one in production)
+DH_G = 5   # Diffie-Hellman generator
 
-# Diffie-Hellman parameters (must match the server)
-DH_P = 23  # Use a large prime in production
-DH_G = 5   # Generator
 
-def encrypt_message(message, aes_key):
-    """Encrypts a message using AES with the provided key."""
-    iv = os.urandom(16)  # Generate a random IV for every message
-    padder = padding.PKCS7(128).padder()
-    padded_message = padder.update(message.encode()) + padder.finalize()
+class ChatClient:
+    def __init__(self, root):
+        self.root = root
+        self.client_socket = None
+        self.aes_key = None
+        self.username = ""
 
-    cipher = Cipher(algorithms.AES(aes_key), modes.CFB(iv), backend=default_backend())
-    encryptor = cipher.encryptor()
-    encrypted_message = encryptor.update(padded_message) + encryptor.finalize()
+        # Frames for GUI
+        self.login_frame = Frame(root, padx=20, pady=20)
+        self.chat_frame = Frame(root, padx=20, pady=20)
 
-    return base64.b64encode(iv + encrypted_message).decode()
+        self.create_login_gui()
 
-def decrypt_message(encrypted_message, aes_key):
-    """Decrypts a message using AES with the provided key."""
-    encrypted_data = base64.b64decode(encrypted_message)
-    iv = encrypted_data[:16]  # Extract the IV (first 16 bytes)
-    encrypted_message = encrypted_data[16:]  # The rest is the encrypted data
+    def create_login_gui(self):
+        """Create the login and register window."""
+        self.login_frame.pack()
 
-    cipher = Cipher(algorithms.AES(aes_key), modes.CFB(iv), backend=default_backend())
-    decryptor = cipher.decryptor()
-    padded_message = decryptor.update(encrypted_message) + decryptor.finalize()
+        Label(self.login_frame, text="Username:").grid(row=0, column=0, sticky=W, pady=5)
+        self.username_entry = Entry(self.login_frame, width=30)
+        self.username_entry.grid(row=0, column=1, pady=5)
 
-    unpadder = padding.PKCS7(128).unpadder()
-    message = unpadder.update(padded_message) + unpadder.finalize()
+        Label(self.login_frame, text="Password:").grid(row=1, column=0, sticky=W, pady=5)
+        self.password_entry = Entry(self.login_frame, show="*", width=30)
+        self.password_entry.grid(row=1, column=1, pady=5)
 
-    return message.decode()
+        Button(self.login_frame, text="Login", command=self.login, width=15).grid(row=2, column=0, pady=10)
+        Button(self.login_frame, text="Register", command=self.register, width=15).grid(row=2, column=1, pady=10)
 
-def perform_key_exchange(client_socket):
-    """Perform Diffie-Hellman key exchange."""
-    # Step 1: Generate client's private and public keys
-    client_private_key = secrets.randbelow(DH_P)
-    client_public_key = pow(DH_G, client_private_key, DH_P)
+    def create_chat_gui(self):
+        """Create the chat window."""
+        self.login_frame.pack_forget()  # Hide login frame
+        self.chat_frame.pack()
 
-    # Step 2: Receive the server's public key
-    server_public_key = int(client_socket.recv(MAX_LEN).decode())
-    print(f"Received server public key: {server_public_key}")
+        self.chat_text = Text(self.chat_frame, state=DISABLED, height=20, width=50)
+        self.chat_text.grid(row=0, column=0, columnspan=2, pady=10)
 
-    # Step 3: Send the client's public key to the server
-    client_socket.sendall(str(client_public_key).encode())
-    print(f"Sent client public key: {client_public_key}")
+        self.message_entry = Entry(self.chat_frame, width=40)
+        self.message_entry.grid(row=1, column=0, pady=10)
 
-    # Step 4: Compute the shared secret
-    shared_secret = pow(server_public_key, client_private_key, DH_P)
-    print(f"Shared secret (client): {shared_secret}")
+        Button(self.chat_frame, text="Send", command=self.send_message, width=10).grid(row=1, column=1, pady=10)
 
-    # Step 5: Derive AES key from the shared secret
-    aes_key = hashlib.sha256(str(shared_secret).encode()).digest()
-    print(f"Derived AES key (client): {aes_key.hex()}")
+    def perform_key_exchange(self):
+        """Perform Diffie-Hellman key exchange with the server."""
+        client_private_key = secrets.randbelow(DH_P)
+        client_public_key = pow(DH_G, client_private_key, DH_P)
 
-    return aes_key
+        # Send public key and receive server's public key
+        server_public_key = int(self.client_socket.recv(MAX_LEN).decode())
+        self.client_socket.sendall(str(client_public_key).encode())
 
-def send_message(aes_key):
-    """Send encrypted messages to the server."""
-    global exit_flag
-    while not exit_flag:
-        try:
-            message = input("You: ")
-            encrypted_message = encrypt_message(message, aes_key)
-            client_socket.sendall(encrypted_message.encode())
-            if message == "#exit":
-                exit_flag = True
-                client_socket.close()
-                return
-        except OSError:
+        # Compute the shared secret and derive AES key
+        shared_secret = pow(server_public_key, client_private_key, DH_P)
+        self.aes_key = hashlib.sha256(str(shared_secret).encode()).digest()
+
+    def login(self):
+        """Handle user login."""
+        self.username = self.username_entry.get()
+        password = self.password_entry.get()
+
+        if not self.username or not password:
+            messagebox.showwarning("Input Error", "Username and password cannot be empty")
             return
 
-def recv_message(aes_key):
-    """Receive and decrypt messages from the server."""
-    global exit_flag
-    while not exit_flag:
-        try:
-            encrypted_message = client_socket.recv(MAX_LEN).decode()
-            if not encrypted_message:
-                continue
-            message = decrypt_message(encrypted_message, aes_key)
-            print(f"\r{message}")
-            print("You: ", end="", flush=True)
-        except Exception as e:
-            print(f"Error receiving message: {e}")
-            break
-    print("Disconnected from server.")
+        credentials = json.dumps({"username": self.username, "password": password, "action": "login"})
+        self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.client_socket.connect(('127.0.0.1', 10000))  # Connect to the server
 
-def signal_handler(sig, frame):
-    """Handle Ctrl+C signal to gracefully disconnect."""
-    global exit_flag
-    if not exit_flag:
-        print("\nDisconnecting...")
-        exit_flag = True
         try:
-            client_socket.sendall("#exit".encode())
-        except OSError:
-            pass
-        client_socket.close()
-        sys.exit(0)
+            self.perform_key_exchange()
+            self.client_socket.sendall(credentials.encode())
+            response = self.client_socket.recv(MAX_LEN).decode()
 
-def login_or_register():
-    """Login or register a new user."""
-    while True:
-        try:
-            choice = input("Type '1' to Login or '2' to Create a new account: ")
-            if choice not in ('1', '2'):
-                print("Invalid choice. Please enter '1' or '2'.")
-                continue
-            username = input("Enter your username: ")
-            password = input("Enter your password: ")
-            credentials = json.dumps({
-                "username": username,
-                "password": password,
-                "action": "login" if choice == '1' else "register"
-            })
-            client_socket.sendall(credentials.encode())
-            response = client_socket.recv(MAX_LEN).decode()
-            print(f"Response from server: {response}")  # Debug log
             if response == "LOGIN_SUCCESS":
-                print("\n\t  ====== Welcome to the chat-room ======   ")
-                return True
-            elif response == "REGISTER_SUCCESS":
-                print("Account created successfully. You are now logged in!")
-                return True
-            elif response == "LOGIN_FAILED":
-                print("Login failed. Check your credentials.")
-            elif response == "REGISTER_FAILED":
-                print("Username already exists. Try again.")
+                messagebox.showinfo("Success", "Login successful!")
+                self.create_chat_gui()
+                threading.Thread(target=self.receive_messages, daemon=True).start()
             else:
-                print("Unknown error occurred.")
+                messagebox.showerror("Login Failed", "Invalid username or password.")
+                self.client_socket.close()
         except Exception as e:
-            print(f"Error during login/register: {e}")
-            return False
+            messagebox.showerror("Error", f"An error occurred: {e}")
+            self.client_socket.close()
 
-def main():
-    """Main function to handle client operations."""
-    global client_socket
-    signal.signal(signal.SIGINT, signal_handler)
-    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_address = ('127.0.0.1', 10000)
-    try:
-        client_socket.connect(server_address)
-    except ConnectionRefusedError:
-        print("Failed to connect to the server. Is it running?")
-        sys.exit(1)
+    def register(self):
+        """Handle user registration."""
+        self.username = self.username_entry.get()
+        password = self.password_entry.get()
 
-    # Step 1: Perform Diffie-Hellman key exchange to generate AES key
-    aes_key = perform_key_exchange(client_socket)
+        if not self.username or not password:
+            messagebox.showwarning("Input Error", "Username and password cannot be empty")
+            return
 
-    # Step 2: Authenticate or register
-    if not login_or_register():
-        client_socket.close()
-        sys.exit(0)
+        credentials = json.dumps({"username": self.username, "password": password, "action": "register"})
+        self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.client_socket.connect(('127.0.0.1', 10000))  # Connect to the server
 
-    # Step 3: Start message threads
-    threading.Thread(target=send_message, args=(aes_key,), daemon=True).start()
-    threading.Thread(target=recv_message, args=(aes_key,), daemon=True).start()
+        try:
+            self.perform_key_exchange()
+            self.client_socket.sendall(credentials.encode())
+            response = self.client_socket.recv(MAX_LEN).decode()
 
-    try:
-        while not exit_flag:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        signal_handler(signal.SIGINT, None)
+            if response == "REGISTER_SUCCESS":
+                messagebox.showinfo("Success", "Registration successful!")
+                self.create_chat_gui()
+                threading.Thread(target=self.receive_messages, daemon=True).start()
+            else:
+                messagebox.showerror("Registration Failed", "Username already exists.")
+                self.client_socket.close()
+        except Exception as e:
+            messagebox.showerror("Error", f"An error occurred: {e}")
+            self.client_socket.close()
 
-if __name__ == "__main__":
-    main()
+    def send_message(self):
+        """Send a message to the server and display it locally."""
+        message = self.message_entry.get()
+        if message:
+            # Display the sent message locally
+            self.chat_text.config(state=NORMAL)
+            self.chat_text.insert(END, f"You: {message}\n")
+            self.chat_text.config(state=DISABLED)
+
+            # Encrypt and send the message
+            encrypted_message = self.encrypt_message(message)
+            self.client_socket.sendall(encrypted_message.encode())
+            self.message_entry.delete(0, END)
+
+    def receive_messages(self):
+        """Receive messages from the server."""
+        while True:
+            try:
+                encrypted_message = self.client_socket.recv(MAX_LEN)  # Receive raw bytes
+                message = self.decrypt_message(encrypted_message)  # Decrypt the message
+                self.chat_text.config(state=NORMAL)
+                self.chat_text.insert(END, f"{message}\n")  # Display received message
+                self.chat_text.config(state=DISABLED)
+            except Exception as e:
+                print(f"Error receiving message: {e}")
+                break
+
+    def encrypt_message(self, message):
+        """Encrypt a message using AES."""
+        iv = os.urandom(16)
+        padder = padding.PKCS7(128).padder()
+        padded_message = padder.update(message.encode()) + padder.finalize()
+
+        cipher = Cipher(algorithms.AES(self.aes_key), modes.CFB(iv), backend=default_backend())
+        encryptor = cipher.encryptor()
+        encrypted_message = encryptor.update(padded_message) + encryptor.finalize()
+
+        return base64.b64encode(iv + encrypted_message).decode()
+
+    def decrypt_message(self, encrypted_message):
+        """Decrypt a message using AES."""
+        encrypted_data = base64.b64decode(encrypted_message)  # Decode from base64
+        iv = encrypted_data[:16]
+        encrypted_message = encrypted_data[16:]
+
+        cipher = Cipher(algorithms.AES(self.aes_key), modes.CFB(iv), backend=default_backend())
+        decryptor = cipher.decryptor()
+        padded_message = decryptor.update(encrypted_message) + decryptor.finalize()
+
+        unpadder = padding.PKCS7(128).unpadder()
+        message = unpadder.update(padded_message) + unpadder.finalize()
+
+        return message.decode('utf-8')  # Decode bytes to string
+
+
+# Run the GUI
+root = Tk()
+root.title("Chat Application")
+root.geometry("400x500")
+client = ChatClient(root)
+root.mainloop()
