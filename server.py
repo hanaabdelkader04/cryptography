@@ -86,9 +86,6 @@ def perform_key_exchange(client_socket):
 
     # Step 5: Derive AES key from the shared secret
     aes_key = hashlib.sha256(str(shared_secret).encode()).digest()
-
-    print(f"Shared secret (server): {shared_secret}")
-    print(f"Derived AES key (server): {aes_key.hex()}")
     return aes_key
 
 def save_user_chat_history(sender, recipient, message, aes_key):
@@ -97,18 +94,6 @@ def save_user_chat_history(sender, recipient, message, aes_key):
     encrypted_message = encrypt_message(f"{sender}: {message}", aes_key)
     with open(filename, "a") as file:
         file.write(encrypted_message + "\n")
-
-def retrieve_chat_history(user1, user2, aes_key):
-    """Retrieve and decrypt chat history."""
-    filename = f"{CHAT_HISTORY_DIR}/{sorted([user1, user2])[0]}_{sorted([user1, user2])[1]}_chat.txt"
-    if not os.path.exists(filename):
-        return "No chat history found."
-    decrypted_history = []
-    with open(filename, "r") as file:
-        for line in file:
-            decrypted_message = decrypt_message(line.strip(), aes_key)
-            decrypted_history.append(decrypted_message)
-    return "\n".join(decrypted_history)
 
 def broadcast_message(message, sender_id, aes_key):
     """Broadcast a message to all clients except the sender."""
